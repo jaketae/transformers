@@ -28,9 +28,7 @@ from .test_modeling_common import ModelTesterMixin, ids_tensor, random_attention
 if is_torch_available():
     import torch
 
-    from transformers import (
-        FastSpeech2Model,
-    )
+    from transformers import FastSpeech2Model
     from transformers.models.fastspeech2.modeling_fastspeech2 import FASTSPEECH2_PRETRAINED_MODEL_ARCHIVE_LIST
 
 
@@ -280,7 +278,6 @@ class FastSpeech2ModelTester:
 
         # test that outputs are equal for slice
         self.parent.assertTrue(torch.allclose(output_from_past_slice, output_from_no_past_slice, atol=1e-3))
-
 
     def prepare_config_and_inputs_for_common(self):
         config_and_inputs = self.prepare_config_and_inputs()
