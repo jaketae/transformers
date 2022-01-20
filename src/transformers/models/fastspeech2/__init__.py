@@ -18,8 +18,7 @@
 from typing import TYPE_CHECKING
 
 # rely on isort to merge the imports
-from ...file_utils import _LazyModule, is_tokenizers_available
-from ...file_utils import is_torch_available
+from ...file_utils import _LazyModule, is_tokenizers_available, is_torch_available
 
 
 _import_structure = {
@@ -33,19 +32,11 @@ if is_tokenizers_available():
 if is_torch_available():
     _import_structure["modeling_fastspeech2"] = [
         "FASTSPEECH2_PRETRAINED_MODEL_ARCHIVE_LIST",
-        "FastSpeech2ForMaskedLM",
-        "FastSpeech2ForCausalLM",
-        "FastSpeech2ForMultipleChoice",
-        "FastSpeech2ForQuestionAnswering",
-        "FastSpeech2ForSequenceClassification",
-        "FastSpeech2ForTokenClassification",
         "FastSpeech2Layer",
         "FastSpeech2Model",
         "FastSpeech2PreTrainedModel",
         "load_tf_weights_in_fastspeech2",
     ]
-
-
 
 
 if TYPE_CHECKING:
@@ -58,18 +49,11 @@ if TYPE_CHECKING:
     if is_torch_available():
         from .modeling_fastspeech2 import (
             FASTSPEECH2_PRETRAINED_MODEL_ARCHIVE_LIST,
-            FastSpeech2ForMaskedLM,
-            FastSpeech2ForCausalLM,
-            FastSpeech2ForMultipleChoice,
-            FastSpeech2ForQuestionAnswering,
-            FastSpeech2ForSequenceClassification,
-            FastSpeech2ForTokenClassification,
             FastSpeech2Layer,
             FastSpeech2Model,
             FastSpeech2PreTrainedModel,
             load_tf_weights_in_fastspeech2,
         )
-
 
 
 else:
