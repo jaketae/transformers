@@ -35,7 +35,6 @@ if is_torch_available():
         "FastSpeech2Layer",
         "FastSpeech2Model",
         "FastSpeech2PreTrainedModel",
-        "load_tf_weights_in_fastspeech2",
     ]
 
 
@@ -52,7 +51,6 @@ if TYPE_CHECKING:
             FastSpeech2Layer,
             FastSpeech2Model,
             FastSpeech2PreTrainedModel,
-            load_tf_weights_in_fastspeech2,
         )
 
 

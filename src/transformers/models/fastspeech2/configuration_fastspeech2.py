@@ -83,8 +83,7 @@ class FastSpeech2Config(PretrainedConfig):
         self,
         vocab_size=79,
         hidden_size=256,
-        num_encoder_layers=4,
-        num_decoder_layers=4,
+        num_hidden_layers=4,
         kernel_size=9,
         num_attention_heads=2,
         intermediate_size=1024,
@@ -93,7 +92,6 @@ class FastSpeech2Config(PretrainedConfig):
         attention_probs_dropout_prob=0.0,
         predictor_probs_dropout_prob=0.5,
         max_position_embeddings=2000,
-        initializer_range=0.02,
         layer_norm_eps=1e-5,
         pad_token_id=0,
         **kwargs
@@ -103,8 +101,7 @@ class FastSpeech2Config(PretrainedConfig):
         self.vocab_size = vocab_size
         self.max_position_embeddings = max_position_embeddings
         self.hidden_size = hidden_size
-        self.num_encoder_layers = num_encoder_layers
-        self.num_decoder_layers = num_decoder_layers
+        self.num_hidden_layers = num_hidden_layers
         self.kernel_size = kernel_size
         self.num_attention_heads = num_attention_heads
         self.intermediate_size = intermediate_size
