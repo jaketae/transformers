@@ -17,7 +17,6 @@
 # limitations under the License.
 
 from . import (
-    fastspeech2,
     albert,
     auto,
     bart,
@@ -48,6 +47,7 @@ from . import (
     dpr,
     electra,
     encoder_decoder,
+    fastspeech2,
     flaubert,
     fnet,
     fsmt,

@@ -150,7 +150,6 @@ _import_structure = {
         "load_tf2_weights_in_pytorch_model",
     ],
     # Models
-    "models.fastspeech2": ["FASTSPEECH2_PRETRAINED_CONFIG_ARCHIVE_MAP", "FastSpeech2Config", "FastSpeech2Tokenizer"],
     "models": [],
     "models.albert": ["ALBERT_PRETRAINED_CONFIG_ARCHIVE_MAP", "AlbertConfig"],
     "models.auto": [
@@ -220,6 +219,7 @@ _import_structure = {
     ],
     "models.electra": ["ELECTRA_PRETRAINED_CONFIG_ARCHIVE_MAP", "ElectraConfig", "ElectraTokenizer"],
     "models.encoder_decoder": ["EncoderDecoderConfig"],
+    "models.fastspeech2": ["FASTSPEECH2_PRETRAINED_CONFIG_ARCHIVE_MAP", "FastSpeech2Config", "FastSpeech2Tokenizer"],
     "models.flaubert": ["FLAUBERT_PRETRAINED_CONFIG_ARCHIVE_MAP", "FlaubertConfig", "FlaubertTokenizer"],
     "models.fnet": ["FNET_PRETRAINED_CONFIG_ARCHIVE_MAP", "FNetConfig", "FNetTokenizer"],
     "models.fsmt": ["FSMT_PRETRAINED_CONFIG_ARCHIVE_MAP", "FSMTConfig", "FSMTTokenizer"],
@@ -629,21 +629,6 @@ if is_torch_available():
 
     # PyTorch models structure
 
-    _import_structure["models.fastspeech2"].extend(
-        [
-            "FASTSPEECH2_PRETRAINED_MODEL_ARCHIVE_LIST",
-            "FastSpeech2ForMaskedLM",
-            "FastSpeech2ForCausalLM",
-            "FastSpeech2ForMultipleChoice",
-            "FastSpeech2ForQuestionAnswering",
-            "FastSpeech2ForSequenceClassification",
-            "FastSpeech2ForTokenClassification",
-            "FastSpeech2Layer",
-            "FastSpeech2Model",
-            "FastSpeech2PreTrainedModel",
-            "load_tf_weights_in_fastspeech2",
-        ]
-    )
     _import_structure["models.albert"].extend(
         [
             "ALBERT_PRETRAINED_MODEL_ARCHIVE_LIST",
@@ -925,6 +910,21 @@ if is_torch_available():
         ]
     )
     _import_structure["models.encoder_decoder"].append("EncoderDecoderModel")
+    _import_structure["models.fastspeech2"].extend(
+        [
+            "FASTSPEECH2_PRETRAINED_MODEL_ARCHIVE_LIST",
+            "FastSpeech2ForCausalLM",
+            "FastSpeech2ForMaskedLM",
+            "FastSpeech2ForMultipleChoice",
+            "FastSpeech2ForQuestionAnswering",
+            "FastSpeech2ForSequenceClassification",
+            "FastSpeech2ForTokenClassification",
+            "FastSpeech2Layer",
+            "FastSpeech2Model",
+            "FastSpeech2PreTrainedModel",
+            "load_tf_weights_in_fastspeech2",
+        ]
+    )
     _import_structure["models.flaubert"].extend(
         [
             "FLAUBERT_PRETRAINED_MODEL_ARCHIVE_LIST",
@@ -2271,7 +2271,6 @@ if TYPE_CHECKING:
         load_tf2_weights_in_pytorch_model,
     )
     from .models.albert import ALBERT_PRETRAINED_CONFIG_ARCHIVE_MAP, AlbertConfig
-    from .models.fastspeech2 import FASTSPEECH2_PRETRAINED_CONFIG_ARCHIVE_MAP, FastSpeech2Config, FastSpeech2Tokenizer
     from .models.auto import (
         ALL_PRETRAINED_CONFIG_ARCHIVE_MAP,
         CONFIG_MAPPING,
@@ -2332,6 +2331,7 @@ if TYPE_CHECKING:
     )
     from .models.electra import ELECTRA_PRETRAINED_CONFIG_ARCHIVE_MAP, ElectraConfig, ElectraTokenizer
     from .models.encoder_decoder import EncoderDecoderConfig
+    from .models.fastspeech2 import FASTSPEECH2_PRETRAINED_CONFIG_ARCHIVE_MAP, FastSpeech2Config, FastSpeech2Tokenizer
     from .models.flaubert import FLAUBERT_PRETRAINED_CONFIG_ARCHIVE_MAP, FlaubertConfig, FlaubertTokenizer
     from .models.fnet import FNET_PRETRAINED_CONFIG_ARCHIVE_MAP, FNetConfig, FNetTokenizer
     from .models.fsmt import FSMT_PRETRAINED_CONFIG_ARCHIVE_MAP, FSMTConfig, FSMTTokenizer
@@ -2503,7 +2503,6 @@ if TYPE_CHECKING:
         from .utils.dummy_sentencepiece_objects import *
 
     if is_tokenizers_available():
-        from .models.fastspeech2 import FastSpeech2TokenizerFast
         from .models.albert import AlbertTokenizerFast
         from .models.bart import BartTokenizerFast
         from .models.barthez import BarthezTokenizerFast
@@ -2518,6 +2517,7 @@ if TYPE_CHECKING:
         from .models.distilbert import DistilBertTokenizerFast
         from .models.dpr import DPRContextEncoderTokenizerFast, DPRQuestionEncoderTokenizerFast, DPRReaderTokenizerFast
         from .models.electra import ElectraTokenizerFast
+        from .models.fastspeech2 import FastSpeech2TokenizerFast
         from .models.fnet import FNetTokenizerFast
         from .models.funnel import FunnelTokenizerFast
         from .models.gpt2 import GPT2TokenizerFast
@@ -2625,19 +2625,6 @@ if TYPE_CHECKING:
 
     if is_torch_available():
 
-        from .models.fastspeech2 import (
-            FASTSPEECH2_PRETRAINED_MODEL_ARCHIVE_LIST,
-            FastSpeech2ForMaskedLM,
-            FastSpeech2ForCausalLM,
-            FastSpeech2ForMultipleChoice,
-            FastSpeech2ForQuestionAnswering,
-            FastSpeech2ForSequenceClassification,
-            FastSpeech2ForTokenClassification,
-            FastSpeech2Layer,
-            FastSpeech2Model,
-            FastSpeech2PreTrainedModel,
-            load_tf_weights_in_fastspeech2,
-        )
         # Benchmarks
         from .benchmark.benchmark import PyTorchBenchmark
         from .benchmark.benchmark_args import PyTorchBenchmarkArguments
@@ -2917,6 +2904,19 @@ if TYPE_CHECKING:
             load_tf_weights_in_electra,
         )
         from .models.encoder_decoder import EncoderDecoderModel
+        from .models.fastspeech2 import (
+            FASTSPEECH2_PRETRAINED_MODEL_ARCHIVE_LIST,
+            FastSpeech2ForCausalLM,
+            FastSpeech2ForMaskedLM,
+            FastSpeech2ForMultipleChoice,
+            FastSpeech2ForQuestionAnswering,
+            FastSpeech2ForSequenceClassification,
+            FastSpeech2ForTokenClassification,
+            FastSpeech2Layer,
+            FastSpeech2Model,
+            FastSpeech2PreTrainedModel,
+            load_tf_weights_in_fastspeech2,
+        )
         from .models.flaubert import (
             FLAUBERT_PRETRAINED_MODEL_ARCHIVE_LIST,
             FlaubertForMultipleChoice,
