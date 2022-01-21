@@ -43,10 +43,6 @@ class FastSpeech2Config(PretrainedConfig):
             the `inputs_ids` passed when calling [`~FastSpeech2Model`] or [`~TFFastSpeech2Model`].
         hidden_size (`int`, *optional*, defaults to 256):
             Dimension of the Transformer encoder layers.
-        num_encoder_layers (`int`, *optional*, defaults to 4):
-            Number of hidden layers prior to the Length Regulator.
-        num_decoder_layers (`int`, *optional*, defaults to 4):
-            Number of hidden layers after the Length Regulator.
         num_attention_heads (`int`, *optional*, defaults to 12):
             Number of attention heads for each attention layer in the Transformer encoder.
         intermediate_size (`int`, *optional*, defaults to 3072):
@@ -82,9 +78,17 @@ class FastSpeech2Config(PretrainedConfig):
     def __init__(
         self,
         vocab_size=79,
+        pitch_size=300,
+        mel_size=80,
         hidden_size=256,
+        cwt_hidden_size=128,
+        cwt_out_size=11,
         num_hidden_layers=4,
+        num_predictor_layers=2,
+        num_duration_predictor_layers=2,
         kernel_size=9,
+        predictor_kernel_size=5,
+        duration_predictor_kernel_size=3,
         num_attention_heads=2,
         intermediate_size=1024,
         hidden_act="gelu",
@@ -99,10 +103,18 @@ class FastSpeech2Config(PretrainedConfig):
         if kernel_size % 2 == 0:
             raise ValueError(f"Expected `kernel_size` to be odd, but got {kernel_size}")
         self.vocab_size = vocab_size
+        self.pitch_size = pitch_size
+        self.mel_size = mel_size
         self.max_position_embeddings = max_position_embeddings
         self.hidden_size = hidden_size
+        self.cwt_hidden_size = cwt_hidden_size
+        self.cwt_out_size = cwt_out_size
         self.num_hidden_layers = num_hidden_layers
+        self.num_predictor_layers = num_predictor_layers
+        self.num_duration_predictor_layers = num_duration_predictor_layers
         self.kernel_size = kernel_size
+        self.predictor_kernel_size = predictor_kernel_size
+        self.duration_predictor_kernel_size = duration_predictor_kernel_size
         self.num_attention_heads = num_attention_heads
         self.intermediate_size = intermediate_size
         self.hidden_act = hidden_act

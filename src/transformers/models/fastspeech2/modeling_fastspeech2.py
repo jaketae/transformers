@@ -296,9 +296,97 @@ class FastSpeech2Encoder(nn.Module):
         return hidden_states
 
 
+class LayerNorm(nn.LayerNorm):
+    """Layer normalization module.
+    :param int nout: output dim size
+    :param int dim: dimension to be normalized
+    """
+
+    def __init__(self, normalized_shape, dim=-1, *args, **kwargs):
+        """Construct an LayerNorm object."""
+        super().__init__(normalized_shape, eps=1e-12, *args, **kwargs)
+        self.dim = dim
+
+    def forward(self, x):
+        """Apply layer normalization.
+        :param torch.Tensor x: input tensor
+        :return: layer normalized tensor
+        :rtype torch.Tensor
+        """
+        if self.dim == -1:
+            return super().forward(x)
+        return super().forward(x.transpose(1, -1)).transpose(1, -1)
+
+
+class DurationPredictor(nn.Module):
+    """
+    This module predicts a duration of each frame in log domain from the hidden embeddings of encoder.
+    Note:
+        The calculation domain of outputs is different in `forward` and `inference`. 
+        In `forward`, the outputs are calculated in log domain; in `inference`, they are calculated in linear domain.
+    """
+
+    def __init__(self, config):
+        super().__init__()
+        self.offset = 1.0
+        kernel_size = config.duration_predictor_kernel_size
+        padding = (kernel_size - 1) // 2
+        self.conv = nn.ModuleList()
+        for _ in range(config.num_duration_predictor_layers):
+            self.conv += [
+                nn.Sequential(
+                    nn.ConstantPad1d((padding, padding), 0),
+                    nn.Conv1d(config.hidden_size, config.hidden_size, kernel_size, stride=1, padding=0),
+                    nn.ReLU(),
+                    LayerNorm(config.hidden_size, dim=1),
+                    nn.Dropout(config.predictor_probs_dropout_prob),
+                )
+            ]
+        self.linear = nn.Linear(config.hidden_size, 1)
+
+    def _forward(self, xs, x_masks=None, is_inference=False):
+        xs = xs.transpose(1, -1)  # (B, idim, Tmax)
+        for f in self.conv:
+            xs = f(xs)  # (B, C, Tmax)
+            if x_masks is not None:
+                xs = xs * (1 - x_masks.float())[:, None, :]
+
+        xs = self.linear(xs.transpose(1, -1))  # [B, T, C]
+        xs = xs * (1 - x_masks.float())[:, :, None]  # (B, T, C)
+        if is_inference:
+            return self.out2dur(xs), xs
+        return xs.squeeze(-1)  # (B, Tmax)
+
+    def out2dur(self, xs):
+        # NOTE: calculate in log domain
+        xs = xs.squeeze(-1)  # (B, Tmax)
+        dur = torch.clamp(torch.round(xs.exp() - self.offset), min=0).long()  # avoid negative value
+        return dur
+
+    def forward(self, xs, x_masks=None):
+        """Calculate forward propagation.
+        Args:
+            xs (Tensor): Batch of input sequences (B, Tmax, idim).
+            x_masks (ByteTensor, optional): Batch of masks indicating padded part (B, Tmax).
+        Returns:
+            Tensor: Batch of predicted durations in log domain (B, Tmax).
+        """
+        return self._forward(xs, x_masks, False)
+
+    def inference(self, xs, x_masks=None):
+        """Inference duration.
+        Args:
+            xs (Tensor): Batch of input sequences (B, Tmax, idim).
+            x_masks (ByteTensor, optional): Batch of masks indicating padded part (B, Tmax).
+        Returns:
+            LongTensor: Batch of predicted durations in linear domain (B, Tmax).
+        """
+        return self._forward(xs, x_masks, True)
+
+
 class LengthRegulator(nn.Module):
     def __init__(self):
-        super(self).__init__()
+        super().__init__()
 
     def forward(self, dur, dur_padding=None, alpha=1.0):
         """
@@ -318,56 +406,46 @@ class LengthRegulator(nn.Module):
             mel2ph (B, T_speech)
         """
         assert alpha > 0
+        device = dur.device
         dur = torch.round(dur.float() * alpha).long()
         if dur_padding is not None:
             dur = dur * (1 - dur_padding.long())
-        token_idx = torch.arange(1, dur.shape[1] + 1)[None, :, None].to(dur.device)
+        token_idx = torch.arange(1, dur.shape[1] + 1)[None, :, None].to(device)
         dur_cumsum = torch.cumsum(dur, 1)
         dur_cumsum_prev = F.pad(dur_cumsum, [1, -1], mode="constant", value=0)
-        pos_idx = torch.arange(dur.sum(-1).max())[None, None].to(dur.device)
+        pos_idx = torch.arange(dur.sum(-1).max())[None, None].to(device)
         token_mask = (pos_idx >= dur_cumsum_prev[:, :, None]) & (pos_idx < dur_cumsum[:, :, None])
         mel2ph = (token_idx * token_mask.long()).sum(1)
         return mel2ph
 
 
-class PitchPredictor(nn.Module):
-    def __init__(self, idim, n_layers=5, n_chans=384, odim=2, kernel_size=5, dropout_rate=0.1, padding="SAME"):
-        """Initilize pitch predictor module.
-        Args:
-            idim (int): Input dimension.
-            n_layers (int, optional): Number of convolutional layers.
-            n_chans (int, optional): Number of channels of convolutional layers.
-            kernel_size (int, optional): Kernel size of convolutional layers.
-            dropout_rate (float, optional): Dropout rate.
-        """
-        super(PitchPredictor, self).__init__()
-        self.padding = padding
-        self.kernel_size = kernel_size
+class CWTPredictor(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        kernel_size = config.predictor_kernel_size
+        padding = (kernel_size - 1) // 2
+        self.dense = nn.Linear(config.hidden_size, config.cwt_hidden_size)
         self.conv = nn.ModuleList()
-        for idx in range(n_layers):
-            in_chans = idim if idx == 0 else n_chans
+        for idx in range(config.num_predictor_layers):
+            in_channels = config.cwt_hidden_size if idx == 0 else config.hidden_size
             self.conv += [
-                torch.nn.Sequential(
-                    nn.ConstantPad1d(
-                        ((kernel_size - 1) // 2, (kernel_size - 1) // 2)
-                        if padding == "SAME"
-                        else (kernel_size - 1, 0),
-                        0,
-                    ),
-                    nn.Conv1d(in_chans, n_chans, kernel_size, stride=1, padding=0),
+                nn.Sequential(
+                    nn.ConstantPad1d((padding, padding), 0),
+                    nn.Conv1d(in_channels, config.hidden_size, kernel_size, stride=1, padding=0),
                     nn.ReLU(),
-                    nn.LayerNorm(n_chans, dim=1),
-                    nn.Dropout(dropout_rate),
+                    LayerNorm(config.hidden_size, dim=1),
+                    nn.Dropout(config.predictor_probs_dropout_prob),
                 )
             ]
-        self.linear = torch.nn.Linear(n_chans, odim)
-        self.embed_positions = FastSpeech2PositionalEmbedding(4096, idim, 0)
+        self.linear = nn.Linear(config.hidden_size, config.cwt_out_size)
+        self.embed_positions = FastSpeech2PositionalEmbedding(4096, config.cwt_hidden_size, 0)
         self.pos_embed_alpha = nn.Parameter(torch.Tensor([1]))
 
     def forward(self, xs):
         """
         :param xs: [B, T, H] :return: [B, T, H]
         """
+        xs = self.dense(xs)
         positions = self.pos_embed_alpha * self.embed_positions(xs[..., 0])
         xs = xs + positions
         xs = xs.transpose(1, -1)  # (B, idim, Tmax)
@@ -376,6 +454,16 @@ class PitchPredictor(nn.Module):
         # NOTE: calculate in log domain
         xs = self.linear(xs.transpose(1, -1))  # (B, Tmax, H)
         return xs
+
+
+def get_cwt_stats_layers(config):
+    return nn.Sequential(
+        nn.Linear(config.hidden_size, config.cwt_hidden_size),
+        nn.ReLU(),
+        nn.Linear(config.cwt_hidden_size, config.cwt_hidden_size),
+        nn.ReLU(),
+        nn.Linear(config.cwt_hidden_size, 2),
+    )
 
 
 class FastSpeech2PreTrainedModel(PreTrainedModel):
@@ -392,7 +480,7 @@ class FastSpeech2PreTrainedModel(PreTrainedModel):
     def _init_weights(self, module):
         """Initialize the weights"""
         if isinstance(module, nn.Linear):
-            module.weight.data.xavier_normal_()
+            nn.init.xavier_uniform_(module.weight)
             if module.bias is not None:
                 module.bias.data.zero_()
         elif isinstance(module, nn.Embedding):
@@ -495,6 +583,11 @@ class FastSpeech2Model(FastSpeech2PreTrainedModel):
         self.encoder = FastSpeech2Encoder(config)
         self.decoder = FastSpeech2Encoder(config)
         self.length_regulator = LengthRegulator()
+        self.duration_predictor = DurationPredictor(config)
+        self.pitch_embedding = nn.Embedding(config.pitch_size, config.hidden_size, config.pad_token_id)
+        self.cwt_predictor = CWTPredictor(config)
+        self.cwt_stats_layers = get_cwt_stats_layers(config)
+        self.mel_head = nn.Linear(config.hidden_size, config.mel_size)
 
         # Initialize weights and apply final processing
         self.post_init()
@@ -519,20 +612,12 @@ class FastSpeech2Model(FastSpeech2PreTrainedModel):
         output_type=BaseModelOutputWithPastAndCrossAttentions,
         config_class=_CONFIG_FOR_DOC,
     )
-    def forward(
-        self,
-        input_ids=None,
-        attention_mask=None,
-        token_type_ids=None,
-        position_ids=None,
-        head_mask=None,
-        inputs_embeds=None,
-        encoder_hidden_states=None,
-        encoder_attention_mask=None,
-        past_key_values=None,
-        use_cache=None,
-        output_attentions=None,
-        output_hidden_states=None,
-        return_dict=None,
-    ):
+    def forward(self, input_ids, attention_mask):
+        non_padding = (input_ids > 0).float()[:, :, None]
+        attention_mask = input_ids.eq(self.config.pad_token_id).data
+        input_embeds = self.embeddings(input_ids)
+        hidden_states = self.encoder(input_embeds, attention_mask) * non_padding
+    
+    def add_duration(self):
         pass
+        
