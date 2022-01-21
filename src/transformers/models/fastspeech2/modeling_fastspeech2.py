@@ -16,14 +16,11 @@
 
 
 import math
-import os
 from typing import Optional
 
 import torch
 import torch.utils.checkpoint
-from packaging import version
 from torch import nn
-from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 from torch.nn import functional as F
 
 from ...activations import ACT2FN
@@ -34,12 +31,7 @@ from ...file_utils import (
     replace_return_docstrings,
 )
 from ...modeling_outputs import BaseModelOutputWithPastAndCrossAttentions
-from ...modeling_utils import (
-    PreTrainedModel,
-    apply_chunking_to_forward,
-    find_pruneable_heads_and_indices,
-    prune_linear_layer,
-)
+from ...modeling_utils import PreTrainedModel
 from ...utils import logging
 from .configuration_fastspeech2 import FastSpeech2Config
 
@@ -126,29 +118,10 @@ class FastSpeech2PositionalEmbedding(nn.Module):
         return incremental_indices.long() + padding_idx
 
 
-class FastSpeech2Embeddings(nn.Module):
-    """Construct the embeddings from word, position and token_type embeddings."""
-
-    def __init__(self, config):
-        super().__init__()
-        self.embed_scale = math.sqrt(config.hidden_size)
-        self.dropout = nn.Dropout(config.hidden_dropout_prob)
-        self.phoneme_embeddings = nn.Embedding(config.vocab_size, config.hidden_size, padding_idx=config.pad_token_id)
-        self.position_embeddings = FastSpeech2PositionalEmbedding(
-            config.max_position_embeddings, config.hidden_size, padding_idx=config.pad_token_id
-        )
-
-    def forward(self, input_ids):
-        input_embeds = self.embed_scale * self.phoneme_embeddings(input_ids)
-        position_embeds = self.position_embeddings(input_ids)
-        embeds = self.dropout(input_embeds + position_embeds)
-        return embeds
-
-
 class FastSpeech2SelfAttention(nn.Module):
     def __init__(self, config):
         super().__init__()
-        if config.hidden_size % config.num_attention_heads != 0 and not hasattr(config, "embedding_size"):
+        if config.hidden_size % config.num_attention_heads != 0:
             raise ValueError(
                 f"The hidden size ({config.hidden_size}) is not a multiple of the number of attention "
                 f"heads ({config.num_attention_heads})"
@@ -156,18 +129,12 @@ class FastSpeech2SelfAttention(nn.Module):
 
         self.hidden_size = config.hidden_size
         self.num_attention_heads = config.num_attention_heads
-        self.attention_head_size = int(config.hidden_size / config.num_attention_heads)
-        self.all_head_size = self.num_attention_heads * self.attention_head_size
         self.attention_probs_dropout_prob = config.attention_probs_dropout_prob
 
         self.kqv_proj = nn.Linear(3 * config.hidden_size, config.hidden_size, bias=False)
         self.out_proj = nn.Linear(config.hidden_size, config.hidden_size, bias=False)
 
-    def forward(
-        self,
-        hidden_states,
-        attention_mask=None,
-    ):
+    def forward(self, hidden_states, attention_mask):
         return F.multi_head_attention_forward(
             query=hidden_states,
             key=hidden_states,
@@ -188,54 +155,30 @@ class FastSpeech2Attention(nn.Module):
         super().__init__()
         self.self = FastSpeech2SelfAttention(config)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
-        self.pruned_heads = set()
 
-    def prune_heads(self, heads):
-        if len(heads) == 0:
-            return
-        heads, index = find_pruneable_heads_and_indices(
-            heads, self.self.num_attention_heads, self.self.attention_head_size, self.pruned_heads
-        )
-
-        # Prune linear layers
-        self.self.kqv_proj = prune_linear_layer(self.self.kqv_proj, index)
-        self.self.out_proj = prune_linear_layer(self.self.out_proj, index)
-
-        # Update hyper params and store pruned heads
-        self.self.num_attention_heads = self.self.num_attention_heads - len(heads)
-        self.self.all_head_size = self.self.attention_head_size * self.self.num_attention_heads
-        self.pruned_heads = self.pruned_heads.union(heads)
-
-    def forward(
-        self,
-        hidden_states,
-        attention_mask=None,
-    ):
-        hidden_states, _ = self.self(
-            hidden_states,
-            attention_mask,
-        )
+    def forward(self, hidden_states, attention_mask=None, output_attentions=False):
+        hidden_states, attentions = self.self(hidden_states, attention_mask)
         hidden_states = self.dropout(hidden_states)
-        return hidden_states
+        return (hidden_states, attentions) if output_attentions else hidden_states
 
 
 class FastSpeech2Intermediate(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.dropout = nn.Dropout(config.hidden_dropout_prob)
-        self.hidden_size = config.hidden_size
+        self.scale = 1 / math.sqrt(config.hidden_size)
         self.conv = nn.Conv1d(
-            config.hidden_size, config.intermediate_size, config.kernel_size, padding=config.kernel_size // 2
+            config.hidden_size,
+            config.intermediate_size,
+            kernel_size=config.kernel_size,
+            padding=config.kernel_size // 2,
         )
-        if isinstance(config.hidden_act, str):
-            self.intermediate_act_fn = ACT2FN[config.hidden_act]
-        else:
-            self.intermediate_act_fn = config.hidden_act
+        self.intermediate_act_fn = ACT2FN[config.hidden_act]
+        self.dropout = nn.Dropout(config.hidden_dropout_prob)
 
     def forward(self, hidden_states):
         # hidden_states.shape == (seq_len, batch_size, num_channels)
         hidden_states = self.conv(hidden_states.permute(1, 2, 0)).permute(2, 0, 1)
-        hidden_states = hidden_states * self.hidden_size ** -0.5
+        hidden_states = self.scale * hidden_states
         hidden_states = self.intermediate_act_fn(hidden_states)
         hidden_states = self.dropout(hidden_states)
         return hidden_states
@@ -247,101 +190,114 @@ class FastSpeech2Output(nn.Module):
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
         self.dense = nn.Linear(config.intermediate_size, config.hidden_size)
 
-    def forward(self, hidden_states, input_tensor):
-        hidden_states = input_tensor + self.dropout(self.dense(hidden_states))
+    def forward(self, hidden_states):
+        hidden_states = self.dropout(self.dense(hidden_states))
         return hidden_states
 
 
 class FastSpeech2Layer(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.seq_len_dim = 1
         self.attention = FastSpeech2Attention(config)
         self.intermediate = FastSpeech2Intermediate(config)
         self.output = FastSpeech2Output(config)
         self.layer_norm1 = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
         self.layer_norm2 = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
 
-    def forward(
-        self,
-        hidden_states,
-        attention_mask=None,
-    ):
-        residual = hidden_states
-        hidden_states = self.attention(self.layer_norm1(hidden_states), attention_mask=attention_mask)
-        hidden_states = residual + hidden_states
-        hidden_states = hidden_states * (1 - attention_mask.float()).transpose(0, 1)[..., None]
+    def forward(self, hidden_states, attention_mask):
+        non_padding_mask = (1 - attention_mask.float()).transpose(0, 1)[..., None]
+
+        residual = hidden_states * non_padding_mask
+        hidden_states = self.layer_norm1(hidden_states)
+        hidden_states = self.attention(hidden_states, attention_mask=attention_mask)
+        hidden_states = (residual + hidden_states) * non_padding_mask
 
         residual = hidden_states
-        hidden_states = self.output(self.intermediate(self.layer_norm2(hidden_states)), residual)
-        hidden_states = hidden_states * (1 - attention_mask.float()).transpose(0, 1)[..., None]
+        hidden_states = self.layer_norm2(hidden_states)
+        hidden_states = self.output(self.intermediate(hidden_states))
+        hidden_states = (residual + hidden_states) * non_padding_mask
 
         return hidden_states
 
 
-class FastSpeech2Encoder(nn.Module):
+class FastSpeech2Backbone(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.config = config
         self.layers = nn.ModuleList([FastSpeech2Layer(config) for _ in range(config.num_hidden_layers)])
         self.layer_norm = nn.LayerNorm(config.hidden_size)
         self.gradient_checkpointing = False
 
     def forward(self, hidden_states, attention_mask):
-        non_padding_mask = 1 - attention_mask.transpose(0, 1).float()[:, :, None]
-        hidden_states = hidden_states.transpose(0, 1) * non_padding_mask
+        hidden_states = hidden_states.transpose(0, 1)
         for layer in self.layers:
-            hidden_states = layer(hidden_states, attention_mask=attention_mask) * non_padding_mask
+            hidden_states = layer(hidden_states, attention_mask=attention_mask)
+        non_padding_mask = 1 - attention_mask.transpose(0, 1).float()[:, :, None]
         hidden_states = self.layer_norm(hidden_states) * non_padding_mask
         return hidden_states
 
 
-class LayerNorm(nn.LayerNorm):
-    """Layer normalization module.
-    :param int nout: output dim size
-    :param int dim: dimension to be normalized
-    """
+class FastSpeech2Encoder(FastSpeech2Backbone):
+    def __init__(self, config):
+        super().__init__(config)
+        self.pad_token_id = config.pad_token_id
+        self.phoneme_embed_scale = math.sqrt(config.hidden_size)
+        self.phoneme_embedding = nn.Embedding(config.vocab_size, config.hidden_size, padding_idx=config.pad_token_id)
+        self.positional_embedding = FastSpeech2PositionalEmbedding(
+            config.max_position_embeddings, config.hidden_size, config.pad_token_id
+        )
+        self.dropout = nn.Dropout(config.hidden_dropout_prob)
 
-    def __init__(self, normalized_shape, dim=-1, *args, **kwargs):
-        """Construct an LayerNorm object."""
-        super().__init__(normalized_shape, eps=1e-12, *args, **kwargs)
-        self.dim = dim
+    def forward(self, input_ids):
+        position_embeds = self.position_embedding(input_ids)
+        phoneme_embeds = self.phoneme_embed_scale * self.phoneme_embedding(input_ids)
+        embeds = self.dropout(phoneme_embeds + position_embeds)
+        attention_mask = input_ids.eq(self.pad_token_id).detach()
+        return super().forward(embeds, attention_mask)
+
+
+class FastSpeech2Decoder(FastSpeech2Backbone):
+    def __init__(self, config):
+        super().__init__(config)
+        self.positional_embedding_scale = nn.Parameter(torch.Tensor([1]))
+        self.positional_embedding = FastSpeech2PositionalEmbedding(
+            config.max_position_embeddings, config.hidden_size, config.pad_token_id
+        )
+        self.dropout = nn.Dropout(config.hidden_dropout_prob)
+        self.mel_head = nn.Linear(config.hidden_size, config.mel_size)
+
+    def forward(self, hidden_states, attention_mask):
+        positional_embeds = self.positional_embedding_scale * self.positional_embedding(hidden_states[..., 0])
+        hidden_states = self.dropout(hidden_states + positional_embeds)
+        hidden_states = super().forward(hidden_states, attention_mask)
+        mel = self.mel_head(hidden_states)
+        return mel
+
+
+class LayerNormTranspose(nn.LayerNorm):
+    def __init__(self, *args, **kwargs):
+        super().__init__(eps=1e-12, *args, **kwargs)
 
     def forward(self, x):
-        """Apply layer normalization.
-        :param torch.Tensor x: input tensor
-        :return: layer normalized tensor
-        :rtype torch.Tensor
-        """
-        if self.dim == -1:
-            return super().forward(x)
         return super().forward(x.transpose(1, -1)).transpose(1, -1)
 
 
 class DurationPredictor(nn.Module):
-    """
-    This module predicts a duration of each frame in log domain from the hidden embeddings of encoder.
-    Note:
-        The calculation domain of outputs is different in `forward` and `inference`. 
-        In `forward`, the outputs are calculated in log domain; in `inference`, they are calculated in linear domain.
-    """
-
     def __init__(self, config):
         super().__init__()
         self.offset = 1.0
         kernel_size = config.duration_predictor_kernel_size
-        padding = (kernel_size - 1) // 2
+        padding = kernel_size // 2
         self.conv = nn.ModuleList()
         for _ in range(config.num_duration_predictor_layers):
-            self.conv += [
+            self.conv.append(
                 nn.Sequential(
                     nn.ConstantPad1d((padding, padding), 0),
-                    nn.Conv1d(config.hidden_size, config.hidden_size, kernel_size, stride=1, padding=0),
+                    nn.Conv1d(config.hidden_size, config.hidden_size, kernel_size),
                     nn.ReLU(),
-                    LayerNorm(config.hidden_size, dim=1),
+                    LayerNormTranspose(config.hidden_size),
                     nn.Dropout(config.predictor_probs_dropout_prob),
                 )
-            ]
+            )
         self.linear = nn.Linear(config.hidden_size, 1)
 
     def _forward(self, xs, x_masks=None, is_inference=False):
@@ -385,9 +341,6 @@ class DurationPredictor(nn.Module):
 
 
 class LengthRegulator(nn.Module):
-    def __init__(self):
-        super().__init__()
-
     def forward(self, dur, dur_padding=None, alpha=1.0):
         """
         Example (no batch dim version):
@@ -423,36 +376,37 @@ class CWTPredictor(nn.Module):
     def __init__(self, config):
         super().__init__()
         kernel_size = config.predictor_kernel_size
-        padding = (kernel_size - 1) // 2
-        self.dense = nn.Linear(config.hidden_size, config.cwt_hidden_size)
+        padding = kernel_size // 2
+        self.linear = nn.Linear(config.hidden_size, config.cwt_hidden_size)
+        # TODO: use `nn.Sequential` instead
         self.conv = nn.ModuleList()
         for idx in range(config.num_predictor_layers):
             in_channels = config.cwt_hidden_size if idx == 0 else config.hidden_size
-            self.conv += [
+            self.conv.append(
                 nn.Sequential(
                     nn.ConstantPad1d((padding, padding), 0),
-                    nn.Conv1d(in_channels, config.hidden_size, kernel_size, stride=1, padding=0),
+                    nn.Conv1d(in_channels, config.hidden_size, kernel_size),
                     nn.ReLU(),
-                    LayerNorm(config.hidden_size, dim=1),
+                    LayerNormTranspose(config.hidden_size),
                     nn.Dropout(config.predictor_probs_dropout_prob),
                 )
-            ]
-        self.linear = nn.Linear(config.hidden_size, config.cwt_out_size)
-        self.embed_positions = FastSpeech2PositionalEmbedding(4096, config.cwt_hidden_size, 0)
-        self.pos_embed_alpha = nn.Parameter(torch.Tensor([1]))
+            )
+        self.out = nn.Linear(config.hidden_size, config.cwt_out_size)
+        self.positional_embedding = FastSpeech2PositionalEmbedding(4096, config.cwt_hidden_size, 0)
+        self.positional_embedding_alpha = nn.Parameter(torch.Tensor([1]))
 
     def forward(self, xs):
         """
         :param xs: [B, T, H] :return: [B, T, H]
         """
-        xs = self.dense(xs)
-        positions = self.pos_embed_alpha * self.embed_positions(xs[..., 0])
+        xs = self.linear(xs)
+        positions = self.positional_embedding_alpha * self.positional_embedding(xs[..., 0])
         xs = xs + positions
         xs = xs.transpose(1, -1)  # (B, idim, Tmax)
         for f in self.conv:
             xs = f(xs)  # (B, C, Tmax)
         # NOTE: calculate in log domain
-        xs = self.linear(xs.transpose(1, -1))  # (B, Tmax, H)
+        xs = self.out(xs.transpose(1, -1))  # (B, Tmax, H)
         return xs
 
 
@@ -475,6 +429,7 @@ class FastSpeech2PreTrainedModel(PreTrainedModel):
     config_class = FastSpeech2Config
     base_model_prefix = "fastspeech2"
     supports_gradient_checkpointing = True
+    # TODO: is this the correct key(s)?
     _keys_to_ignore_on_load_missing = [r"position_ids"]
 
     def _init_weights(self, module):
@@ -559,51 +514,23 @@ FASTSPEECH2_INPUTS_DOCSTRING = r"""
 
 
 @add_start_docstrings(
-    "The bare FastSpeech2 Model transformer outputting raw hidden-states without any specific head on top.",
+    "The FastSpeech2 Model that outputs predicted mel-spectrograms.",
     FASTSPEECH2_START_DOCSTRING,
 )
 class FastSpeech2Model(FastSpeech2PreTrainedModel):
-    """
-
-    The model can behave as an encoder (with only self-attention) as well as a decoder, in which case a layer of
-    cross-attention is added between the self-attention layers, following the architecture described in [Attention is
-    all you need](https://arxiv.org/abs/1706.03762) by Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit,
-    Llion Jones, Aidan N. Gomez, Lukasz Kaiser and Illia Polosukhin.
-
-    To behave as an decoder the model needs to be initialized with the `is_decoder` argument of the configuration set
-    to `True`. To be used in a Seq2Seq model, the model needs to initialized with both `is_decoder` argument and
-    `add_cross_attention` set to `True`; an `encoder_hidden_states` is then expected as an input to the forward pass.
-    """
-
     def __init__(self, config):
         super().__init__(config)
         self.config = config
-
-        self.embeddings = FastSpeech2Embeddings(config)
         self.encoder = FastSpeech2Encoder(config)
-        self.decoder = FastSpeech2Encoder(config)
+        self.decoder = FastSpeech2Decoder(config)
         self.length_regulator = LengthRegulator()
         self.duration_predictor = DurationPredictor(config)
-        self.pitch_embedding = nn.Embedding(config.pitch_size, config.hidden_size, config.pad_token_id)
         self.cwt_predictor = CWTPredictor(config)
         self.cwt_stats_layers = get_cwt_stats_layers(config)
-        self.mel_head = nn.Linear(config.hidden_size, config.mel_size)
+        self.pitch_embedding = nn.Embedding(config.pitch_size, config.hidden_size, config.pad_token_id)
 
         # Initialize weights and apply final processing
         self.post_init()
-
-    def get_input_embeddings(self):
-        return self.embeddings.phoneme_embeddings
-
-    def set_input_embeddings(self, value):
-        self.embeddings.phoneme_embeddings = value
-
-    def _prune_heads(self, heads_to_prune):
-        """Prunes heads of the model.
-        heads_to_prune: dict of {layer_num: list of heads to prune in this layer} See base class PreTrainedModel
-        """
-        for layer, heads in heads_to_prune.items():
-            self.encoder.layer[layer].attention.prune_heads(heads)
 
     @add_start_docstrings_to_model_forward(FASTSPEECH2_INPUTS_DOCSTRING.format("batch_size, sequence_length"))
     @add_code_sample_docstrings(
@@ -612,12 +539,48 @@ class FastSpeech2Model(FastSpeech2PreTrainedModel):
         output_type=BaseModelOutputWithPastAndCrossAttentions,
         config_class=_CONFIG_FOR_DOC,
     )
-    def forward(self, input_ids, attention_mask):
-        non_padding = (input_ids > 0).float()[:, :, None]
-        attention_mask = input_ids.eq(self.config.pad_token_id).data
-        input_embeds = self.embeddings(input_ids)
-        hidden_states = self.encoder(input_embeds, attention_mask) * non_padding
-    
-    def add_duration(self):
-        pass
-        
+    def forward(self, input_ids, f0=None, uv=None):
+        encoder_output = self.encoder(input_ids)
+        input_non_padding_mask = (input_ids > 0).float()[:, :, None]
+
+        # add duration
+        duration_input = encoder_output * input_non_padding_mask
+        mel2ph = self.add_dur(duration_input, input_ids)
+
+        decoder_input = F.pad(encoder_output, [0, 0, 1, 0])
+
+        mel2ph_ = mel2ph[..., None].repeat([1, 1, encoder_output.shape[-1]])
+        decoder_input_original = decoder_input = torch.gather(decoder_input, 1, mel2ph_)  # [B, T, H]
+
+        output_non_padding_mask = (mel2ph > 0).float()[:, :, None]
+        pitch_input = decoder_input_original * output_non_padding_mask
+
+        pitch_input_ph = encoder_output * input_non_padding_mask
+        decoder_input = decoder_input + self.add_pitch(pitch_input, f0, uv, mel2ph, encoder_out=pitch_input_ph)
+
+    def add_duration(self, duration_input, input_ids):
+        padding = input_ids == self.config.pad_token_id
+        duration_input = duration_input.detach() + 0.1 * (duration_input - duration_input.detach())
+        duration, _ = self.duration_predictor.inference(duration_input, padding)
+        mel2ph = self.length_regulator(duration, padding).detach()
+        return mel2ph
+
+    def add_pitch(self, pitch_input, f0, uv, mel2ph, encoder_output):
+        decoder_inp = pitch_input.detach() + hparams["predictor_grad"] * (pitch_input - pitch_input.detach())
+        pitch_padding = mel2ph == 0
+        pitch_padding = None
+        ret["cwt"] = cwt_out = self.cwt_predictor(decoder_inp)
+        stats_out = self.cwt_stats_layers(encoder_output[:, 0, :])  # [B, 2]
+        mean = ret["f0_mean"] = stats_out[:, 0]
+        std = ret["f0_std"] = stats_out[:, 1]
+        cwt_spec = cwt_out[:, :, :10]
+        if f0 is None:
+            std = std * hparams["cwt_std_scale"]
+            f0 = self.cwt2f0_norm(cwt_spec, mean, std, mel2ph)
+            if hparams["use_uv"]:
+                assert cwt_out.shape[-1] == 11
+                uv = cwt_out[:, :, -1] > 0
+        ret["f0_denorm"] = f0_denorm = denorm_f0(f0, uv, hparams, pitch_padding=pitch_padding)
+        pitch = f0_to_coarse(f0_denorm)  # start from 0
+        pitch_embed = self.pitch_embed(pitch)
+        return pitch_embed
